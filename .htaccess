@@ -1,0 +1,49 @@
+# ============================================================
+#  .htaccess - HTTP Backup Server (PHP Edition)
+#  Letakkan file ini di folder yang sama dengan backup_server.php
+# ============================================================
+
+# --- Routing: arahkan semua request ke backup_server.php ---
+# Syarat: mod_rewrite aktif di Apache
+# Aktifkan dengan: a2enmod rewrite  (Linux)
+# Atau: httpd.conf -> LoadModule rewrite_module modules/mod_rewrite.so
+
+RewriteEngine On
+
+# Jangan rewrite jika request ke file yang benar-benar ada (gambar, dll.)
+RewriteCond %{REQUEST_FILENAME} !-f
+
+# Teruskan semua request ke backup_server.php, pertahankan query string
+RewriteRule ^(.*)$ backup_server.php [QSA,L]
+
+# --- Proteksi file sensitif dari akses HTTP langsung ---
+# File .ini, .log, .db TIDAK boleh diakses langsung oleh browser/client
+
+# Apache 2.4+
+<IfModule mod_authz_core.c>
+    <FilesMatch "\.(ini|log|db|bak)$">
+        Require all denied
+    </FilesMatch>
+</IfModule>
+
+# Apache 2.2 (fallback)
+<IfModule !mod_authz_core.c>
+    <FilesMatch "\.(ini|log|db|bak)$">
+        Order allow,deny
+        Deny from all
+    </FilesMatch>
+</IfModule>
+
+# Jangan tampilkan daftar isi direktori
+Options -Indexes
+
+# Nonaktifkan akses ke file yang diawali titik (.git, .htpasswd, dll.)
+<FilesMatch "^\.">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>

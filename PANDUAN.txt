@@ -1,0 +1,590 @@
+================================================================
+  PANDUAN SISTEM HTTP BACKUP
+  Versi 1.0 - Backup via Protokol HTTP
+================================================================
+
+DAFTAR ISI
+----------
+  1. Gambaran Arsitektur
+  2. Persyaratan Sistem
+  3. Pilihan Backend Server Sumber (PHP vs Python)
+  4. Setup Server Sumber — PHP Edition (Apache)
+  5. Setup Server Sumber — Python Edition (Standalone)
+  6. Setup Server Backup (Python Client)
+  7. Konfigurasi File
+  8. Setup Windows Task Scheduler
+  9. Cara Kerja Backup (Initial & Incremental)
+ 10. Pengujian Koneksi
+ 11. Troubleshooting
+ 12. Keamanan
+ 13. Perintah Berguna
+
+
+================================================================
+1. GAMBARAN ARSITEKTUR
+================================================================
+
+  [SERVER SUMBER]                        [SERVER BACKUP]
+  ┌─────────────────────────────┐        ┌──────────────────────────────┐
+  │  Apache + PHP               │  HTTP  │  Python (http_backup_client) │
+  │  backup_server.php          │◄──────►│  client_config.ini           │
+  │  backup_server_config.ini   │        │  backup_state.db (SQLite)    │
+  │  (data di D:\Data, dll.)    │        │  D:\Backup\ (hasil backup)   │
+  └─────────────────────────────┘        └──────────────────────────────┘
+           atau
+  ┌─────────────────────────────┐
+  │  Python (Standalone)        │
+  │  http_backup_server.py      │
+  │  server_config.ini          │
+  └─────────────────────────────┘
+
+Alur kerja:
+  1. Server Backup memanggil GET /api/files ke Server Sumber
+  2. Server Sumber men-scan direktori, mengembalikan daftar file + metadata
+  3. Server Backup membandingkan metadata dengan database SQLite lokal
+  4. File yang baru atau lebih baru (mtime) didownload via GET /api/file
+  5. Database diupdate setelah setiap file berhasil didownload
+
+
+================================================================
+2. PERSYARATAN SISTEM
+================================================================
+
+SERVER SUMBER (PHP Edition):
+  - Apache 2.2 atau lebih baru dengan:
+    * mod_rewrite aktif
+    * mod_php atau PHP-FPM
+    * AllowOverride All (untuk .htaccess berfungsi)
+  - PHP 7.2 atau lebih baru (tidak perlu extension tambahan)
+  - Port yang dibuka di firewall (default: 80 atau 443)
+
+SERVER SUMBER (Python Edition — alternatif):
+  - Python 3.7 atau lebih baru
+  - Tidak perlu pip install (hanya Python standard library)
+  - Port 8765 dibuka di firewall
+
+SERVER BACKUP (Python Client):
+  - Python 3.7 atau lebih baru
+  - Tidak perlu pip install (hanya Python standard library + sqlite3 bawaan)
+  - Akses jaringan ke Server Sumber
+
+
+================================================================
+3. PILIHAN BACKEND SERVER SUMBER
+================================================================
+
+Jika di Server Sumber sudah ada Apache + PHP yang berjalan,
+GUNAKAN PHP EDITION — tidak perlu menjalankan proses tambahan.
+
+  PHP Edition:
+  + Berjalan di bawah Apache yang sudah ada
+  + Tidak perlu process tambahan
+  + Mudah diintegrasikan dengan virtual host yang ada
+  - Perlu mod_rewrite aktif
+
+  Python Edition:
+  + Berjalan standalone, tidak perlu Apache/PHP
+  + Mudah dijalankan di server yang tidak punya web server
+  - Perlu port terpisah (8765) dan process baru yang berjalan terus
+
+
+================================================================
+4. SETUP SERVER SUMBER — PHP EDITION (APACHE)
+================================================================
+
+-- LANGKAH 1: Aktifkan mod_rewrite (jika belum) --
+
+  Windows (XAMPP / Apache standalone):
+    1. Buka file httpd.conf (biasanya di C:\Apache24\conf\httpd.conf
+       atau C:\xampp\apache\conf\httpd.conf)
+    2. Cari baris: #LoadModule rewrite_module modules/mod_rewrite.so
+    3. Hapus tanda # di depannya
+    4. Cari <Directory "C:/Apache24/htdocs"> (atau htdocs Anda)
+    5. Pastikan: AllowOverride All
+    6. Restart Apache
+
+  Linux (Apache2):
+    sudo a2enmod rewrite
+    sudo systemctl restart apache2
+
+-- LANGKAH 2: Buat folder backup di web root --
+
+  Windows contoh: C:\Apache24\htdocs\backup\
+  Linux contoh  : /var/www/html/backup/
+
+-- LANGKAH 3: Copy file ke folder tersebut --
+
+  File yang perlu dicopy ke folder backup/:
+    - backup_server.php
+    - backup_server_config.ini
+    - .htaccess
+
+  Jika di Windows Explorer file .htaccess tidak terlihat,
+  pastikan "Show hidden files" diaktifkan.
+
+-- LANGKAH 4: Edit backup_server_config.ini --
+
+  Buka backup_server_config.ini dengan text editor, edit:
+
+  [SERVER]
+  AuthToken = <isi dengan string acak yang kuat, minimal 32 karakter>
+  SourceDirectories = Data=D:\Data;Dokumen=D:\Dokumen
+
+  Cara generate token:
+    php -r "echo bin2hex(random_bytes(32));"
+    python -c "import secrets; print(secrets.token_hex(32))"
+
+-- LANGKAH 5: Uji akses --
+
+  Buka browser atau gunakan curl:
+    http://IP_SERVER/backup/health
+
+  Response yang diharapkan:
+    {"status":"ok","version":"1.0.0","engine":"PHP/8.x.x",...}
+
+  Jika ada error 404 atau RewriteRule tidak berfungsi:
+  -> Lihat bagian Troubleshooting
+
+-- LANGKAH 6: Firewall --
+
+  Jika port 80 belum dibuka:
+  Windows:
+    netsh advfirewall firewall add rule name="Apache HTTP" ^
+      dir=in action=allow protocol=TCP localport=80
+
+  Linux:
+    sudo ufw allow 80/tcp
+    sudo firewall-cmd --add-port=80/tcp --permanent && firewall-cmd --reload
+
+
+================================================================
+5. SETUP SERVER SUMBER — PYTHON EDITION (STANDALONE)
+================================================================
+
+Gunakan ini jika tidak ada Apache di server sumber.
+
+-- LANGKAH 1: Edit server_config.ini --
+
+  [SERVER]
+  Host = 0.0.0.0
+  Port = 8765
+  AuthToken = <token yang sama dengan client>
+  SourceDirectories = Data=D:\Data;Dokumen=D:\Dokumen
+
+-- LANGKAH 2: Jalankan server --
+
+  Cara manual:
+    python http_backup_server.py server_config.ini
+
+  Atau klik dua kali run_http_backup_server.bat
+
+-- LANGKAH 3: Jalankan sebagai Windows Service (opsional) --
+
+  Agar server otomatis berjalan saat Windows startup tanpa login:
+
+  Opsi A — Menggunakan NSSM (Non-Sucking Service Manager):
+    1. Download nssm.exe dari https://nssm.cc/download
+    2. nssm install BackupServer "python" "C:\BackupApp\http_backup_server.py"
+    3. nssm start BackupServer
+
+  Opsi B — Task Scheduler:
+    1. Buat task baru di Task Scheduler
+    2. Trigger: At startup
+    3. Action: python C:\BackupApp\http_backup_server.py
+    4. General: Run whether user is logged on or not
+
+-- LANGKAH 4: Buka port firewall --
+
+  netsh advfirewall firewall add rule name="BackupServer" ^
+    dir=in action=allow protocol=TCP localport=8765
+
+
+================================================================
+6. SETUP SERVER BACKUP (PYTHON CLIENT)
+================================================================
+
+Server Backup adalah mesin yang MENERIMA backup dari server sumber.
+
+-- LANGKAH 1: Buat folder instalasi --
+
+  Contoh: C:\BackupApp\
+
+  Copy file berikut ke folder tersebut:
+    - http_backup_client.py
+    - client_config.ini
+    - run_http_backup_client.bat
+    - install_http_backup_scheduler.bat
+
+-- LANGKAH 2: Edit client_config.ini --
+
+  [CLIENT]
+  ; URL server sumber. Gunakan URL sesuai pilihan backend:
+  ;
+  ; Jika PHP Edition (Apache):
+  ;   ServerUrl = http://192.168.1.100/backup
+  ;
+  ; Jika Python Edition (port 8765):
+  ;   ServerUrl = http://192.168.1.100:8765
+  ServerUrl = http://192.168.1.100/backup
+
+  ; HARUS sama persis dengan AuthToken di server
+  AuthToken = <token yang sama dengan server>
+
+  ; Folder tujuan backup di mesin ini
+  BackupDirectory = D:\Backup
+
+  ; Jumlah thread parallel (sesuaikan bandwidth)
+  MaxWorkers = 4
+
+-- LANGKAH 3: Test backup manual --
+
+  Buka Command Prompt di C:\BackupApp\, jalankan:
+    python http_backup_client.py client_config.ini
+
+  Backup pertama kali akan otomatis menjadi INITIAL BACKUP
+  (backup semua file). Run berikutnya hanya file baru/berubah.
+
+-- LANGKAH 4: Setup Task Scheduler --
+
+  Lihat Bagian 8.
+
+
+================================================================
+7. KONFIGURASI FILE
+================================================================
+
+=== backup_server_config.ini (PHP Edition - Server Sumber) ===
+
+  [SERVER]
+  AuthToken          = <string rahasia, min 32 karakter>
+  LogFile            = backup_server.log
+  SourceDirectories  = NamaSumber1=D:\Path1;NamaSumber2=D:\Path2
+
+  [FILTERS]
+  ExcludeExtensions  = .tmp;.bak;.log;.temp;.swp
+  ExcludeFolders     = temp;cache;node_modules;.git
+
+  Catatan SourceDirectories:
+  - "NamaSumber" digunakan sebagai nama folder di sisi client
+  - Folder di server backup: BackupDirectory\NamaSumber\relative\path
+  - Contoh: D:\Backup\Data\laporan\2025\jan.xlsx
+
+=== server_config.ini (Python Edition - Server Sumber) ===
+
+  [SERVER]
+  Host               = 0.0.0.0
+  Port               = 8765
+  AuthToken          = <string rahasia, min 32 karakter>
+  LogFile            = backup_server.log
+  SourceDirectories  = NamaSumber1=D:\Path1;NamaSumber2=D:\Path2
+
+  [FILTERS]
+  ExcludeExtensions  = .tmp;.bak;.log
+  ExcludeFolders     = temp;cache;node_modules
+
+=== client_config.ini (Server Backup) ===
+
+  [CLIENT]
+  ServerUrl          = http://IP_SERVER/backup   (PHP)
+                    atau http://IP_SERVER:8765    (Python)
+  AuthToken          = <SAMA dengan server>
+  BackupDirectory    = D:\Backup
+  LogFile            = backup_client.log
+  DatabaseFile       = backup_state.db
+  MaxWorkers         = 4      ; thread concurrent download
+  RetryCount         = 3      ; retry jika download gagal
+  RetryDelay         = 5      ; detik antara retry
+  ConnectionTimeout  = 30     ; detik timeout koneksi
+  ReadTimeout        = 300    ; detik timeout baca (untuk file besar)
+
+
+================================================================
+8. SETUP WINDOWS TASK SCHEDULER
+================================================================
+
+Backup dijalankan otomatis setiap hari oleh Task Scheduler
+di Server Backup (bukan server sumber).
+
+-- Metode Otomatis --
+
+  1. Buka Command Prompt sebagai Administrator
+  2. Edit install_http_backup_scheduler.bat:
+     Ubah: set BACKUP_APP_DIR=C:\BackupApp
+     Sesuaikan dengan folder instalasi Anda
+  3. Jalankan install_http_backup_scheduler.bat sebagai Administrator
+  4. Task "HttpBackup_Daily" akan berjalan tiap hari pukul 02:00
+
+-- Metode Manual via GUI --
+
+  1. Buka Task Scheduler (taskschd.msc)
+  2. Klik "Create Basic Task"
+  3. Name: HttpBackup_Daily
+  4. Trigger: Daily, 02:00 AM
+  5. Action: Start a program
+     Program: C:\BackupApp\run_http_backup_client.bat
+  6. General tab:
+     - Run whether user is logged on or not
+     - Run with highest privileges
+
+-- Atur jadwal backup lebih dari sekali sehari --
+
+  Buat multiple task atau gunakan trigger "Repeat task":
+  1. Buat task, klik "Triggers" tab
+  2. Edit trigger, centang "Repeat task every: 4 hours"
+  3. Klik OK
+
+-- Verifikasi task berjalan --
+
+  Buka Task Scheduler -> Task Scheduler Library
+  Cari "HttpBackup_Daily"
+  Klik kanan -> Run untuk test
+
+
+================================================================
+9. CARA KERJA BACKUP (INITIAL & INCREMENTAL)
+================================================================
+
+INITIAL BACKUP (pertama kali):
+  - Terjadi otomatis saat database backup_state.db masih kosong
+  - Semua file dari semua source directory di-download
+  - Setiap file yang berhasil dicatat di SQLite (mtime, path, size)
+
+INCREMENTAL BACKUP (setiap hari setelah initial):
+  - Client meminta daftar file + metadata dari server
+  - Setiap file dibandingkan:
+    * Jika file BELUM ADA di database -> download (file baru)
+    * Jika mtime server > mtime di database -> download (file berubah)
+    * Jika mtime sama atau lebih lama -> skip (tidak perlu backup)
+  - Hanya file yang relevan yang didownload — hemat bandwidth
+
+STRUKTUR FOLDER HASIL BACKUP:
+  D:\Backup\
+  └── Data\                  <- nama source dari SourceDirectories
+  │   ├── laporan\
+  │   │   ├── jan.xlsx
+  │   │   └── feb.xlsx
+  │   └── project\
+  │       └── data.csv
+  └── Documents\
+      └── surat\
+          └── memo.docx
+
+PERINTAH KHUSUS:
+  # Force initial backup ulang (re-download semua file):
+  python http_backup_client.py client_config.ini --force-initial
+
+  # Lihat riwayat sesi backup:
+  python http_backup_client.py client_config.ini --history
+
+
+================================================================
+10. PENGUJIAN KONEKSI
+================================================================
+
+Setelah setup, lakukan pengujian berurutan:
+
+-- Test 1: Server bisa dijangkau --
+
+  Dari browser atau dari Server Backup, akses:
+    PHP Edition  : http://IP_SERVER/backup/health
+    Python Edition: http://IP_SERVER:8765/health
+
+  Hasil yang diharapkan:
+    {"status":"ok","version":"1.0.0","sources":["Data","Documents"]}
+
+  Jika tidak bisa diakses:
+  -> Cek firewall di server sumber
+  -> Cek Apache berjalan (PHP) atau script Python berjalan
+
+-- Test 2: Autentikasi --
+
+  Dari Server Backup, jalankan (ganti TOKEN dan IP):
+    python -c "
+    from urllib.request import urlopen, Request
+    req = Request('http://IP_SERVER/backup/api/files')
+    req.add_header('X-Auth-Token', 'TOKEN_ANDA')
+    resp = urlopen(req, timeout=30)
+    import json; data = json.loads(resp.read())
+    print('Total file:', data['total_files'])
+    "
+
+-- Test 3: Backup manual pertama kali --
+
+  python http_backup_client.py client_config.ini
+
+  Amati output dan log backup_client.log.
+
+-- Test 4: Verifikasi incremental --
+
+  Jalankan backup kedua kali (tanpa mengubah file di server):
+    python http_backup_client.py client_config.ini
+
+  Output harus menampilkan:
+    "Tidak ada file baru atau yang berubah. X file sudah up-to-date."
+
+
+================================================================
+11. TROUBLESHOOTING
+================================================================
+
+MASALAH: 404 Not Found saat akses /backup/health
+  - Pastikan mod_rewrite aktif di Apache
+  - Pastikan AllowOverride All di httpd.conf untuk folder backup
+  - Pastikan .htaccess ada di folder backup/
+  - Cek error log Apache: C:\Apache24\logs\error.log atau /var/log/apache2/error.log
+
+MASALAH: 403 Forbidden
+  - Cek izin folder backup_server.php bisa dibaca Apache
+  - Windows: Apache perlu hak baca folder source data (cek service account)
+  - Linux: sudo chown -R www-data:www-data /var/www/html/backup/
+
+MASALAH: 401 Unauthorized
+  - Token di client_config.ini tidak sama dengan di backup_server_config.ini
+  - Salin token langsung (copy-paste) untuk menghindari typo
+  - Pastikan tidak ada spasi di awal/akhir token
+
+MASALAH: File config bisa diakses via browser (backup_server_config.ini)
+  - Pastikan .htaccess ada dan mod_authz_core aktif
+  - Test: curl http://IP/backup/backup_server_config.ini
+    harus mengembalikan 403 Forbidden
+  - Solusi aman: pindah config ke luar web root, update $config_file di PHP
+
+MASALAH: Backup lambat
+  - Naikkan MaxWorkers di client_config.ini (misal: 8)
+  - Pastikan jaringan antara server tidak ada bottleneck
+  - Cek apakah antivirus scan setiap file saat di-baca
+
+MASALAH: "Source directory tidak ditemukan"
+  - Cek path di SourceDirectories menggunakan backslash ganda atau forward slash
+  - Windows: pastikan service Apache punya hak akses ke drive/folder tersebut
+  - Jika menggunakan path network (\\server\share): pastikan credentials tersedia
+
+MASALAH: Timeout saat download file besar
+  - Naikkan ReadTimeout di client_config.ini (misal: 600)
+  - PHP: tambahkan di backup_server.php: set_time_limit(0);
+    atau di php.ini: max_execution_time = 0
+
+MASALAH: backup_state.db korup
+  - Hapus file backup_state.db di Server Backup
+  - Jalankan backup lagi — akan otomatis jadi initial backup
+
+MASALAH: Task Scheduler tidak berjalan
+  - Cek apakah account service punya hak "Log on as batch job"
+  - Cek Event Viewer -> Windows Logs -> Application untuk error
+  - Test manual: klik kanan task -> Run
+
+
+================================================================
+12. KEAMANAN
+================================================================
+
+REKOMENDASI KEAMANAN:
+
+1. AuthToken
+   - Gunakan string acak minimal 32 karakter
+   - Jangan gunakan kata-kata yang bisa ditebak
+   - Generate: php -r "echo bin2hex(random_bytes(32));"
+   - Simpan token ini dengan aman (jangan simpan di version control)
+
+2. HTTPS (sangat direkomendasikan untuk jaringan tidak trusted)
+   - Install SSL certificate di Apache (Let's Encrypt untuk public server)
+   - Ubah ServerUrl client menjadi https://...
+   - Ini mencegah token dan data file disadap di jaringan
+
+3. Batasi akses IP (Apache .htaccess atau firewall)
+   Tambahkan di .htaccess untuk izinkan hanya IP backup server:
+     <Files "backup_server.php">
+         Require ip 192.168.1.101
+     </Files>
+
+4. Config di luar web root (paling aman)
+   Edit baris di backup_server.php:
+     $config_file = __DIR__ . DIRECTORY_SEPARATOR . 'backup_server_config.ini';
+   Ubah menjadi path absolut di luar htdocs:
+     $config_file = 'C:\\BackupConfig\\backup_server_config.ini';
+
+5. Log file
+   Rotasi log secara berkala agar tidak membesar.
+   Di Windows bisa menggunakan script PowerShell atau logrotate.
+
+6. Source directories
+   Hanya expose folder yang benar-benar perlu dibackup.
+   Jangan expose root drive (C:\) atau folder sistem.
+
+7. Hak akses minimal
+   PHP/Apache hanya perlu hak READ pada folder source data.
+   Jangan berikan hak write/delete.
+
+
+================================================================
+13. PERINTAH BERGUNA
+================================================================
+
+=== SERVER SUMBER ===
+
+  # Jalankan server Python (jika pakai Python Edition)
+  python http_backup_server.py server_config.ini
+
+  # Cek apakah Apache berjalan
+  httpd -t          (test config)
+  net start Apache  (Windows)
+  sudo systemctl status apache2  (Linux)
+
+  # Aktifkan mod_rewrite (Linux)
+  sudo a2enmod rewrite
+  sudo systemctl restart apache2
+
+=== SERVER BACKUP ===
+
+  # Backup manual (auto-detect initial/incremental)
+  python http_backup_client.py client_config.ini
+
+  # Force initial backup ulang (re-download semua)
+  python http_backup_client.py client_config.ini --force-initial
+
+  # Lihat riwayat sesi backup
+  python http_backup_client.py client_config.ini --history
+
+  # Install Task Scheduler (jalankan sebagai Admin)
+  install_http_backup_scheduler.bat
+
+  # Cek status Task Scheduler
+  schtasks /query /tn "HttpBackup_Daily"
+
+  # Jalankan task secara manual
+  schtasks /run /tn "HttpBackup_Daily"
+
+  # Hapus task
+  schtasks /delete /tn "HttpBackup_Daily" /f
+
+=== PENGUJIAN ===
+
+  # Cek health server (tanpa autentikasi)
+  curl http://IP_SERVER/backup/health
+
+  # Cek daftar file dengan token
+  curl -H "X-Auth-Token: TOKEN_ANDA" http://IP_SERVER/backup/api/files
+
+  # Download satu file
+  curl -H "X-Auth-Token: TOKEN_ANDA" \
+    "http://IP_SERVER/backup/api/file?source=Data&path=laporan/jan.xlsx" \
+    -o jan.xlsx
+
+  # Cek isi database backup state
+  python -c "
+  import sqlite3
+  conn = sqlite3.connect('backup_state.db')
+  rows = conn.execute('SELECT COUNT(*) FROM backed_files').fetchone()
+  print('Total file di DB:', rows[0])
+  sessions = conn.execute(
+    'SELECT * FROM backup_sessions ORDER BY id DESC LIMIT 5'
+  ).fetchall()
+  for s in sessions: print(s)
+  "
+
+
+================================================================
+  Untuk pertanyaan atau masalah, periksa file log:
+  - Server Sumber   : backup_server.log  (di folder PHP)
+  - Server Backup   : backup_client.log  (di folder client)
+================================================================
