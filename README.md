@@ -8,8 +8,11 @@ Mendukung dua mode server sumber: **Python** (standalone) dan **PHP/Apache** (dr
 
 ## Fitur
 
+- **Mode Incremental Backup (BARU!)** — backup awal ke folder utama, backup berikutnya hanya file yang berubah ke folder dengan timestamp
+  - 📖 **[Quick Start Guide](QUICK_START_INCREMENTAL.md)** - Mulai dalam 5 menit!
+  - 📖 **[Panduan Lengkap](INCREMENTAL_BACKUP_GUIDE.md)** - Dokumentasi detail
 - **Initial backup otomatis** — pertama kali dijalankan, semua file didownload
-- **Incremental backup** — hanya file baru atau yang berubah yang didownload
+- **Incremental tracking** — hanya file baru atau yang berubah yang didownload
 - **Multi-thread download** — concurrent download untuk mempercepat proses
 - **SQLite tracking** — melacak status setiap file tanpa database eksternal
 - **Retry otomatis** — download diulang otomatis jika gagal
@@ -114,6 +117,7 @@ ServerUrl = http://192.168.1.100:8765        # Python Edition
 ; ServerUrl = http://192.168.1.100/backup    # PHP Edition
 AuthToken = isi_dengan_token_yang_sama_dengan_server
 BackupDirectory = D:\Backup
+BackupMode = incremental                     # incremental (default) atau overwrite
 MaxWorkers = 4
 ```
 
@@ -147,6 +151,9 @@ python http_backup_client.py client_config.ini --force-initial
 # Lihat riwayat sesi backup
 python http_backup_client.py client_config.ini --history
 
+# Check update (periksa versi baru)
+python http_backup_client.py --check-update
+
 # Cek status task scheduler
 schtasks /query /tn "HttpBackup_Daily"
 
@@ -155,6 +162,22 @@ curl http://IP_SERVER:8765/health
 
 # Test dengan token
 curl -H "X-Auth-Token: TOKEN_ANDA" http://IP_SERVER:8765/api/files
+```
+
+### Script PowerShell (Mode Incremental)
+
+```powershell
+# Restore file terbaru
+.\restore_file.ps1 -FileName "Data\dokumen\laporan.xlsx" -RestoreTo "C:\Restore"
+
+# Lihat history versi file
+.\restore_file.ps1 -FileName "Data\dokumen\laporan.xlsx" -ShowHistory
+
+# Cleanup folder incremental lama (preview)
+.\cleanup_old_backups.ps1 -DaysToKeep 30 -DryRun
+
+# Cleanup folder incremental lama (hapus)
+.\cleanup_old_backups.ps1 -DaysToKeep 30
 ```
 
 ---
@@ -171,9 +194,12 @@ curl -H "X-Auth-Token: TOKEN_ANDA" http://IP_SERVER:8765/api/files
 
 ## Cara Kerja Backup
 
+### Mode Incremental (DEFAULT - Direkomendasikan)
+
 **Initial Backup** (pertama kali / `--force-initial`):
-- Semua file dari semua source directory didownload
+- Semua file dari semua source directory didownload ke folder utama
 - Setiap file dicatat di SQLite (path, mtime, size)
+- Struktur: `D:\Backup\NamaSumber\path\file.ext`
 
 **Incremental Backup** (setiap hari berikutnya):
 - Client meminta daftar file + metadata dari server
@@ -181,8 +207,44 @@ curl -H "X-Auth-Token: TOKEN_ANDA" http://IP_SERVER:8765/api/files
   - Belum ada di DB → download (file baru)
   - `mtime` server lebih baru → download (file berubah)
   - `mtime` sama → skip (sudah up-to-date)
+- File yang berubah disimpan ke folder dengan timestamp
+- Struktur: `D:\Backup\incremental_YYYYMMDD_HHMMSS\NamaSumber\path\file.ext`
 
-**Struktur folder hasil backup:**
+**Keuntungan Mode Incremental:**
+- ✅ Hemat storage (hanya simpan file yang berubah)
+- ✅ Hemat bandwidth (hanya download file yang berubah)
+- ✅ Backup lebih cepat
+- ✅ History tracking (mudah lihat file mana yang berubah dan kapan)
+- ✅ Recovery fleksibel (bisa restore dari versi tertentu)
+
+**Contoh struktur folder:**
+
+```
+D:\Backup\
+├── Data\                              # Initial backup
+│   ├── laporan\
+│   │   └── jan.xlsx
+│   └── project\
+│       └── data.csv
+├── incremental_20260512_143025\       # Backup 12 Mei 2026, 14:30:25
+│   └── Data\
+│       └── laporan\
+│           └── jan.xlsx               # jan.xlsx berubah
+├── incremental_20260513_020015\       # Backup 13 Mei 2026, 02:00:15
+│   └── Data\
+│       └── project\
+│           └── data.csv               # data.csv berubah
+└── backup_state.db                    # Database tracking
+```
+
+### Mode Overwrite (Mode Lama)
+
+Set `BackupMode = overwrite` di `client_config.ini` untuk menggunakan mode lama:
+- Semua file selalu dibackup ke folder utama
+- File yang sudah ada akan di-overwrite
+- Tidak ada folder timestamp
+
+**Struktur folder hasil backup (mode overwrite):**
 
 ```
 D:\Backup\
@@ -195,6 +257,8 @@ D:\Backup\
     └── surat\
         └── memo.docx
 ```
+
+📖 **Panduan lengkap mode incremental**: Lihat [INCREMENTAL_BACKUP_GUIDE.md](INCREMENTAL_BACKUP_GUIDE.md)
 
 ---
 

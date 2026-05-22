@@ -39,8 +39,9 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 from urllib.parse import urlencode, quote
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 CHUNK_SIZE = 64 * 1024  # 64KB per chunk saat receive
+UPDATE_CHECK_URL = "https://raw.githubusercontent.com/yourusername/backup-system/main/version.json"
 
 
 # ---------------------------------------------------------------------------
@@ -59,15 +60,111 @@ def _format_size(size_bytes: int) -> str:
     return f"{size:.1f} {units[i]}"
 
 
+def check_for_updates(current_version: str, update_url: str = UPDATE_CHECK_URL) -> dict:
+    """
+    Cek apakah ada versi baru tersedia.
+    
+    Returns:
+        dict dengan keys:
+        - available: bool (True jika ada update)
+        - latest_version: str
+        - current_version: str
+        - changelog: list
+        - download_url: str
+        - error: str (jika ada error)
+    """
+    result = {
+        "available": False,
+        "latest_version": current_version,
+        "current_version": current_version,
+        "changelog": [],
+        "download_url": "",
+        "error": ""
+    }
+    
+    try:
+        # Download version info
+        req = Request(update_url)
+        req.add_header("User-Agent", f"HTTPBackupClient/{current_version}")
+        
+        with urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        
+        latest_version = data.get("version", current_version)
+        result["latest_version"] = latest_version
+        result["changelog"] = data.get("changelog", [])
+        result["download_url"] = data.get("download_url", "")
+        
+        # Compare versions (simple string comparison)
+        # Format: "1.1.0" -> [1, 1, 0]
+        def parse_version(v):
+            try:
+                return [int(x) for x in v.split(".")]
+            except:
+                return [0, 0, 0]
+        
+        current_parts = parse_version(current_version)
+        latest_parts = parse_version(latest_version)
+        
+        # Check if latest > current
+        if latest_parts > current_parts:
+            result["available"] = True
+        
+    except Exception as e:
+        result["error"] = str(e)
+    
+    return result
+
+
+def display_update_info(update_info: dict):
+    """Tampilkan informasi update dengan format yang bagus."""
+    if update_info.get("error"):
+        print(f"\n⚠️  Tidak dapat memeriksa update: {update_info['error']}")
+        return
+    
+    if not update_info.get("available"):
+        print(f"\n✅ Anda menggunakan versi terbaru: v{update_info['current_version']}")
+        return
+    
+    print("\n" + "╔" + "═" * 58 + "╗")
+    print("║" + "  UPDATE TERSEDIA!".center(58) + "║")
+    print("╠" + "═" * 58 + "╣")
+    print(f"║  Versi saat ini  : v{update_info['current_version']}".ljust(59) + "║")
+    print(f"║  Versi terbaru   : v{update_info['latest_version']}".ljust(59) + "║")
+    print("╠" + "═" * 58 + "╣")
+    
+    # Tampilkan changelog untuk versi terbaru
+    for changelog in update_info.get("changelog", []):
+        if changelog["version"] == update_info["latest_version"]:
+            print("║  Perubahan:".ljust(59) + "║")
+            for change in changelog.get("changes", [])[:5]:  # Max 5 items
+                change_text = f"  • {change}"
+                if len(change_text) > 56:
+                    change_text = change_text[:53] + "..."
+                print(f"║  {change_text}".ljust(59) + "║")
+            break
+    
+    print("╠" + "═" * 58 + "╣")
+    if update_info.get("download_url"):
+        print(f"║  Download: {update_info['download_url'][:44]}".ljust(59) + "║")
+    print("╚" + "═" * 58 + "╝")
+    print()
+
+
 def setup_logging(log_file: str) -> logging.Logger:
     logger = logging.getLogger("BackupClient")
     logger.setLevel(logging.INFO)
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 
     try:
-        log_dir = os.path.dirname(os.path.abspath(log_file))
+        # Sisipkan tanggal ke nama file: backup_client.log -> backup_client_2026-05-22.log
+        today = datetime.now().strftime("%Y-%m-%d")
+        log_path = Path(log_file)
+        dated_log_file = str(log_path.with_name(f"{log_path.stem}_{today}{log_path.suffix}"))
+
+        log_dir = os.path.dirname(os.path.abspath(dated_log_file))
         os.makedirs(log_dir, exist_ok=True)
-        fh = logging.FileHandler(log_file, encoding="utf-8")
+        fh = logging.FileHandler(dated_log_file, encoding="utf-8")
         fh.setFormatter(fmt)
         logger.addHandler(fh)
     except Exception as e:
@@ -105,6 +202,7 @@ class BackupClientConfig:
         self.retry_delay = 5      # detik antara retry
         self.conn_timeout = 30    # detik connection timeout
         self.read_timeout = 300   # detik read timeout (untuk file besar)
+        self.backup_mode = "incremental"  # Mode backup: "incremental" atau "overwrite"
 
         self._load_config()
 
@@ -129,6 +227,8 @@ class BackupClientConfig:
         self.conn_timeout = self.config.getint("CLIENT", "ConnectionTimeout",
                                                fallback=30)
         self.read_timeout = self.config.getint("CLIENT", "ReadTimeout", fallback=300)
+        self.backup_mode  = self.config.get("CLIENT", "BackupMode", 
+                                            fallback="incremental").lower()
 
     def _create_default_config(self):
         cfg = configparser.ConfigParser()
@@ -138,6 +238,7 @@ class BackupClientConfig:
             "BackupDirectory":    "D:\\Backup",
             "LogFile":            "backup_client.log",
             "DatabaseFile":       "backup_state.db",
+            "BackupMode":         "incremental",
             "MaxWorkers":         "4",
             "RetryCount":         "3",
             "RetryDelay":         "5",
@@ -155,6 +256,7 @@ class BackupClientConfig:
         print("  ServerUrl  = http://IP_SERVER_SUMBER:8765")
         print("  AuthToken  = (sama dengan yang ada di server_config.ini)")
         print("  BackupDirectory = D:\\Backup")
+        print("  BackupMode = incremental  (atau 'overwrite' untuk mode lama)")
         print()
         sys.exit(0)
 
@@ -488,17 +590,26 @@ class BackupClient:
 
     def _download_file(self, source: str, rel_path: str,
                        mtime: float, size: int,
-                       index: int, total: int) -> tuple:
+                       index: int, total: int,
+                       backup_folder: str = None) -> tuple:
         """
         Download satu file dari server, simpan ke backup directory.
         Mempunyai mekanisme retry.
+
+        Args:
+            backup_folder: Folder tujuan backup (untuk mode incremental dengan timestamp)
 
         Returns:
             (success: bool, bytes_downloaded: int, dest_path: str, error: str)
         """
         # Tentukan path tujuan di backup directory
-        # Struktur: BACKUP_DIR/source_name/relative_path
-        dest = Path(self.config.backup_dir) / source / rel_path.replace("/", os.sep)
+        if backup_folder:
+            # Mode incremental: gunakan folder dengan timestamp
+            dest = Path(backup_folder) / source / rel_path.replace("/", os.sep)
+        else:
+            # Mode overwrite: langsung ke backup directory
+            dest = Path(self.config.backup_dir) / source / rel_path.replace("/", os.sep)
+        
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         # Path temporary saat download (hindari file tidak lengkap)
@@ -536,7 +647,7 @@ class BackupClient:
                 except Exception:
                     pass  # Bukan critical error
 
-                self.logger.debug(
+                self.logger.info(
                     f"  [{index}/{total}] OK: [{source}] {rel_path} "
                     f"({_format_size(bytes_recv)})"
                 )
@@ -568,31 +679,48 @@ class BackupClient:
 
     def _download_worker(self, task: tuple) -> tuple:
         """Worker function untuk thread pool download."""
-        index, total, file_info = task
+        index, total, file_info, backup_folder = task
         source   = file_info["source"]
         rel_path = file_info["relative_path"]
         mtime    = file_info["mtime"]
         size     = file_info["size"]
 
-        success, bytes_dl, dest_path, error = self._download_file(
-            source, rel_path, mtime, size, index, total
-        )
+        try:
+            success, bytes_dl, dest_path, error = self._download_file(
+                source, rel_path, mtime, size, index, total, backup_folder
+            )
 
-        if success:
-            # Update database di thread ini (koneksi per-thread)
-            self.db.upsert_file(source, rel_path, size, mtime, dest_path)
+            if success:
+                # Update database di thread ini (koneksi per-thread)
+                self.db.upsert_file(source, rel_path, size, mtime, dest_path)
 
-        return success, bytes_dl, error, source, rel_path
+            return success, bytes_dl, error, source, rel_path
+
+        except Exception as exc:
+            error_msg = str(exc)
+            self.logger.error(
+                f"  [{index}/{total}] ERROR tak terduga: [{source}] {rel_path} - {error_msg}"
+            )
+            return False, 0, error_msg, source, rel_path
 
     def run_backup(self):
         """
         Entry point utama untuk menjalankan backup.
         Menentukan mode (initial / incremental) dan mendownload file yang diperlukan.
+        
+        Mode Incremental:
+        - Initial backup: Backup semua file ke folder utama (BACKUP_DIR/source_name/)
+        - Incremental backup: Hanya backup file yang berubah ke folder dengan timestamp
+          (BACKUP_DIR/incremental_YYYYMMDD_HHMMSS/source_name/)
+        
+        Mode Overwrite:
+        - Selalu backup ke folder utama dan overwrite file yang ada
         """
         self.logger.info("=" * 60)
         self.logger.info(f"HTTP BACKUP CLIENT v{VERSION} DIMULAI")
         self.logger.info(f"Server  : {self.config.server_url}")
         self.logger.info(f"Backup  : {self.config.backup_dir}")
+        self.logger.info(f"Mode    : {self.config.backup_mode.upper()}")
         self.logger.info(f"Workers : {self.config.max_workers}")
         self.logger.info("=" * 60)
 
@@ -605,7 +733,26 @@ class BackupClient:
 
         # 2. Tentukan mode backup
         is_initial = self.force_initial or self.db.is_initial_backup_needed()
-        session_type = "initial" if is_initial else "incremental"
+        
+        # Untuk mode incremental, tentukan folder tujuan
+        backup_folder = None
+        if self.config.backup_mode == "incremental":
+            if is_initial:
+                # Initial backup: langsung ke folder utama
+                session_type = "initial"
+                backup_folder = None
+                self.logger.info("Mode INCREMENTAL - Initial backup ke folder utama")
+            else:
+                # Incremental backup: ke folder dengan timestamp
+                session_type = "incremental"
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_folder = os.path.join(self.config.backup_dir, f"incremental_{timestamp}")
+                self.logger.info(f"Mode INCREMENTAL - Backup ke folder: incremental_{timestamp}")
+        else:
+            # Mode overwrite: selalu ke folder utama
+            session_type = "overwrite"
+            backup_folder = None
+            self.logger.info("Mode OVERWRITE - Backup ke folder utama (overwrite)")
 
         if is_initial and not self.force_initial:
             self.logger.info("Database backup kosong -> menjalankan INITIAL BACKUP.")
@@ -646,6 +793,8 @@ class BackupClient:
         print(f"  Tipe    : {session_type.upper()}")
         print(f"  File    : {total_files} ({_format_size(total_size_to_dl)})")
         print(f"  Workers : {self.config.max_workers} thread concurrent")
+        if backup_folder:
+            print(f"  Folder  : {os.path.basename(backup_folder)}")
         print()
 
         # 6. Catat sesi ke database
@@ -653,7 +802,7 @@ class BackupClient:
 
         # 7. Download dengan thread pool
         tasks = [
-            (i + 1, total_files, f)
+            (i + 1, total_files, f, backup_folder)
             for i, f in enumerate(files_to_backup)
         ]
 
@@ -684,10 +833,10 @@ class BackupClient:
                 except Exception as exc:
                     failed_count += 1
                     task = future_map[future]
-                    _, _, file_info = task
-                    failed_files.append(
-                        f"[{file_info['source']}] {file_info['relative_path']}: {exc}"
-                    )
+                    _, _, file_info, _ = task
+                    err_str = f"[{file_info['source']}] {file_info['relative_path']}: {exc}"
+                    self.logger.error(f"  ERROR tak terduga saat backup: {err_str}")
+                    failed_files.append(err_str)
 
                 # Update progress display
                 self.progress.update(
@@ -717,7 +866,11 @@ class BackupClient:
         print(f"║  Total data  : {_format_size(total_bytes_dl)}".ljust(59) + "║")
         print(f"║  Kecepatan   : {_format_size(int(speed))}/s".ljust(59) + "║")
         print(f"║  Waktu       : {elapsed:.1f} detik".ljust(59) + "║")
-        print(f"║  Tujuan      : {self.config.backup_dir[:50]}".ljust(59) + "║")
+        if backup_folder:
+            folder_display = os.path.basename(backup_folder)[:50]
+            print(f"║  Folder      : {folder_display}".ljust(59) + "║")
+        else:
+            print(f"║  Tujuan      : {self.config.backup_dir[:50]}".ljust(59) + "║")
         print("╚" + "═" * 58 + "╝")
         print()
 
@@ -776,11 +929,28 @@ def main():
     # Parse argumen sederhana
     args = sys.argv[1:]
     force_initial = "--force-initial" in args
+    check_update = "--check-update" in args
     args = [a for a in args if not a.startswith("--")]
 
     # Tampilkan help
     if "--help" in sys.argv or "-h" in sys.argv:
         print(__doc__)
+        print("\nArgumen tambahan:")
+        print("  --check-update   : Periksa apakah ada versi baru tersedia")
+        print("  --force-initial  : Paksa initial backup ulang")
+        print("  --history        : Tampilkan riwayat backup")
+        sys.exit(0)
+
+    # Check update
+    if check_update:
+        print()
+        print("╔" + "═" * 58 + "╗")
+        print("║" + f"  HTTP BACKUP CLIENT  v{VERSION}".center(58) + "║")
+        print("╚" + "═" * 58 + "╝")
+        print("\n🔍 Memeriksa update...")
+        
+        update_info = check_for_updates(VERSION)
+        display_update_info(update_info)
         sys.exit(0)
 
     config_path = args[0] if args else "client_config.ini"

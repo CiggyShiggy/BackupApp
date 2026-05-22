@@ -1,0 +1,28 @@
+{
+  "version": "1.1.0",
+  "release_date": "2026-05-12",
+  "update_url": "https://raw.githubusercontent.com/yourusername/backup-system/main/version.json",
+  "download_url": "https://github.com/yourusername/backup-system/releases/latest",
+  "changelog": [
+    {
+      "version": "1.1.0",
+      "date": "2026-05-12",
+      "changes": [
+        "Tambah mode incremental backup (default)",
+        "Backup file yang berubah ke folder timestamp",
+        "Script PowerShell untuk restore dan cleanup",
+        "Fitur check update otomatis"
+      ]
+    },
+    {
+      "version": "1.0.0",
+      "date": "2026-05-01",
+      "changes": [
+        "Initial release",
+        "HTTP backup client dan server",
+        "Multi-thread download",
+        "SQLite tracking"
+      ]
+    }
+  ]
+}
