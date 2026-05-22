@@ -41,7 +41,7 @@ from urllib.parse import urlencode, quote
 
 VERSION = "1.1.0"
 CHUNK_SIZE = 64 * 1024  # 64KB per chunk saat receive
-UPDATE_CHECK_URL = "https://raw.githubusercontent.com/yourusername/backup-system/main/version.json"
+UPDATE_CHECK_URL = "https://github.com/CiggyShiggy/BackupApp/blob/main/version.json?raw=true"
 
 
 # ---------------------------------------------------------------------------
